@@ -7,9 +7,9 @@
 #include "windivert.h"
 #include "goodbyedpi.h"
 
-static const char fake_http_request[] = "GET / HTTP/1.1\r\nHost: www.w3.org\r\n"
-                                        "User-Agent: curl/7.65.3\r\nAccept: */*\r\n"
-                                        "Accept-Encoding: deflate, gzip, br\r\n\r\n";
+static const unsigned char fake_http_request[] = "GET / HTTP/1.1\r\nHost: www.w3.org\r\n"
+                                                 "User-Agent: curl/7.65.3\r\nAccept: */*\r\n"
+                                                 "Accept-Encoding: deflate, gzip, br\r\n\r\n";
 static const unsigned char fake_https_request[] = {
     0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x01, 0xfc, 0x03, 0x03, 0x9a, 0x8f, 0xa7, 0x6a, 0x5d,
     0x57, 0xf3, 0x62, 0x19, 0xbe, 0x46, 0x82, 0x45, 0xe2, 0x59, 0x5c, 0xb4, 0x48, 0x31, 0x12, 0x15,
@@ -53,7 +53,8 @@ static int send_fake_data(const HANDLE w_filter,
                           const BOOL is_ipv6,
                           const BOOL is_https,
                           const BYTE set_ttl,
-                          const BYTE set_checksum
+                          const BYTE set_checksum,
+                          const BYTE set_seq
                          ) {
     char packet_fake[MAX_PACKET_SIZE];
     WINDIVERT_ADDRESS addr_new;
@@ -63,11 +64,14 @@ static int send_fake_data(const HANDLE w_filter,
     PWINDIVERT_IPHDR ppIpHdr;
     PWINDIVERT_IPV6HDR ppIpV6Hdr;
     PWINDIVERT_TCPHDR ppTcpHdr;
-    char *fake_request_data = is_https ? fake_https_request : fake_http_request;
+    unsigned const char *fake_request_data = is_https ? fake_https_request : fake_http_request;
     UINT fake_request_size = is_https ? sizeof(fake_https_request) : sizeof(fake_http_request) - 1;
 
     memcpy(&addr_new, addr, sizeof(WINDIVERT_ADDRESS));
     memcpy(packet_fake, pkt, packetLen);
+
+    addr_new.PseudoTCPChecksum = 0;
+    addr_new.PseudoIPChecksum = 0;
 
     if (!is_ipv6) {
         // IPv4 TCP Data packet
@@ -107,9 +111,16 @@ static int send_fake_data(const HANDLE w_filter,
             ppIpV6Hdr->HopLimit = set_ttl;
     }
 
+    if (set_seq) {
+        // This is the smallest ACK drift Linux can't handle already, since at least v2.6.18.
+        // https://github.com/torvalds/linux/blob/v2.6.18/net/netfilter/nf_conntrack_proto_tcp.c#L395
+        ppTcpHdr->AckNum = htonl(ntohl(ppTcpHdr->AckNum) - 66000);
+        // This is just random, no specifics about this value.
+        ppTcpHdr->SeqNum = htonl(ntohl(ppTcpHdr->SeqNum) - 10000);
+    }
+
     // Recalculate the checksum
-    addr_new.PseudoTCPChecksum = 0;
-    WinDivertHelperCalcChecksums(packet_fake, packetLen_new, &addr_new, NULL);
+    WinDivertHelperCalcChecksums(packet_fake, packetLen_new, &addr_new, 0ULL);
 
     if (set_checksum) {
         // ...and damage it
@@ -127,23 +138,46 @@ static int send_fake_data(const HANDLE w_filter,
     return 0;
 }
 
+static int send_fake_request(const HANDLE w_filter,
+                                  const PWINDIVERT_ADDRESS addr,
+                                  const char *pkt,
+                                  const UINT packetLen,
+                                  const BOOL is_ipv6,
+                                  const BOOL is_https,
+                                  const BYTE set_ttl,
+                                  const BYTE set_checksum,
+                                  const BYTE set_seq
+                                 ) {
+    if (set_ttl) {
+        send_fake_data(w_filter, addr, pkt, packetLen,
+                          is_ipv6, is_https,
+                          set_ttl, FALSE, FALSE);
+    }
+    if (set_checksum) {
+        send_fake_data(w_filter, addr, pkt, packetLen,
+                          is_ipv6, is_https,
+                          FALSE, set_checksum, FALSE);
+    }
+    if (set_seq) {
+        send_fake_data(w_filter, addr, pkt, packetLen,
+                          is_ipv6, is_https,
+                          FALSE, FALSE, set_seq);
+    }
+    return 0;
+}
+
 int send_fake_http_request(const HANDLE w_filter,
                                   const PWINDIVERT_ADDRESS addr,
                                   const char *pkt,
                                   const UINT packetLen,
                                   const BOOL is_ipv6,
                                   const BYTE set_ttl,
-                                  const BYTE set_checksum
+                                  const BYTE set_checksum,
+                                  const BYTE set_seq
                                  ) {
-    return send_fake_data(w_filter,
-                          addr,
-                          pkt,
-                          packetLen,
-                          is_ipv6,
-                          FALSE,
-                          set_ttl,
-                          set_checksum
-           );
+    return send_fake_request(w_filter, addr, pkt, packetLen,
+                          is_ipv6, FALSE,
+                          set_ttl, set_checksum, set_seq);
 }
 
 int send_fake_https_request(const HANDLE w_filter,
@@ -152,15 +186,10 @@ int send_fake_https_request(const HANDLE w_filter,
                                    const UINT packetLen,
                                    const BOOL is_ipv6,
                                    const BYTE set_ttl,
-                                   const BYTE set_checksum
+                                   const BYTE set_checksum,
+                                   const BYTE set_seq
                                  ) {
-    return send_fake_data(w_filter,
-                          addr,
-                          pkt,
-                          packetLen,
-                          is_ipv6,
-                          TRUE,
-                          set_ttl,
-                          set_checksum
-           );
+    return send_fake_request(w_filter, addr, pkt, packetLen,
+                          is_ipv6, TRUE,
+                          set_ttl, set_checksum, set_seq);
 }

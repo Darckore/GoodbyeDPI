@@ -1,11 +1,19 @@
-GoodbyeDPI — Passive Deep Packet Inspection blocker and Active DPI circumvention utility
+GoodbyeDPI — Deep Packet Inspection circumvention utility
 =========================
 
 This software designed to bypass Deep Packet Inspection systems found in many Internet Service Providers which block access to certain websites.
 
 It handles DPI connected using optical splitter or port mirroring (**Passive DPI**) which do not block any data but just replying faster than requested destination, and **Active DPI** connected in sequence.
 
-**Windows 7, 8, 8.1 and 10** with administrator privileges required.
+**Windows 7, 8, 8.1, 10 or 11** with administrator privileges required.
+
+# Quick start
+
+* **For Russia**: Download [latest version from Releases page](https://github.com/ValdikSS/GoodbyeDPI/releases), unpack the file and run **1_russia_blacklist_dnsredir.cmd** script.
+* For other countries: Download [latest version from Releases page](https://github.com/ValdikSS/GoodbyeDPI/releases), unpack the file and run **2_any_country_dnsredir.cmd**.
+
+These scripts launch GoodbyeDPI in recommended mode with DNS resolver redirection to Yandex DNS on non-standard port (to prevent DNS poisoning).  
+If it works — congratulations! You can use it as-is or configure further.
 
 # How to use
 
@@ -17,40 +25,71 @@ Usage: goodbyedpi.exe [OPTION...]
  -r          replace Host with hoSt
  -s          remove space between host header and its value
  -m          mix Host header case (test.com -> tEsT.cOm)
- -f [value]  set HTTP fragmentation to value
- -k [value]  enable HTTP persistent (keep-alive) fragmentation and set it to value
+ -f <value>  set HTTP fragmentation to value
+ -k <value>  enable HTTP persistent (keep-alive) fragmentation and set it to value
  -n          do not wait for first segment ACK when -k is enabled
- -e [value]  set HTTPS fragmentation to value
+ -e <value>  set HTTPS fragmentation to value
  -a          additional space between Method and Request-URI (enables -s, may break sites)
  -w          try to find and parse HTTP traffic on all processed ports (not only on port 80)
- --port        [value]    additional TCP port to perform fragmentation on (and HTTP tricks with -w)
- --ip-id       [value]    handle additional IP ID (decimal, drop redirects and TCP RSTs with this ID).
+ --port        <value>    additional TCP port to perform fragmentation on (and HTTP tricks with -w)
+ --ip-id       <value>    handle additional IP ID (decimal, drop redirects and TCP RSTs with this ID).
                           This option can be supplied multiple times.
- --dns-addr    [value]    redirect UDP DNS requests to the supplied IP address (experimental)
- --dns-port    [value]    redirect UDP DNS requests to the supplied port (53 by default)
- --dnsv6-addr  [value]    redirect UDPv6 DNS requests to the supplied IPv6 address (experimental)
- --dnsv6-port  [value]    redirect UDPv6 DNS requests to the supplied port (53 by default)
+ --dns-addr    <value>    redirect UDP DNS requests to the supplied IP address (experimental)
+ --dns-port    <value>    redirect UDP DNS requests to the supplied port (53 by default)
+ --dnsv6-addr  <value>    redirect UDPv6 DNS requests to the supplied IPv6 address (experimental)
+ --dnsv6-port  <value>    redirect UDPv6 DNS requests to the supplied port (53 by default)
  --dns-verb               print verbose DNS redirection messages
- --blacklist   [txtfile]  perform HTTP tricks only to host names and subdomains from
-                          supplied text file. This option can be supplied multiple times.
- --set-ttl     [value]    activate Fake Request Mode and send it with supplied TTL value.
-                          DANGEROUS! May break websites in unexpected ways. Use with care.
+ --blacklist   <txtfile>  perform circumvention tricks only to host names and subdomains from
+                          supplied text file (HTTP Host/TLS SNI).
+                          This option can be supplied multiple times.
+ --allow-no-sni           perform circumvention if TLS SNI can't be detected with --blacklist enabled.
+ --set-ttl     <value>    activate Fake Request Mode and send it with supplied TTL value.
+                          DANGEROUS! May break websites in unexpected ways. Use with care (or --blacklist).
+ --auto-ttl    [a1-a2-m]  activate Fake Request Mode, automatically detect TTL and decrease
+                          it based on a distance. If the distance is shorter than a2, TTL is decreased
+                          by a2. If it's longer, (a1; a2) scale is used with the distance as a weight.
+                          If the resulting TTL is more than m(ax), set it to m.
+                          Default (if set): --auto-ttl 1-4-10. Also sets --min-ttl 3.
+                          DANGEROUS! May break websites in unexpected ways. Use with care (or --blacklist).
+ --min-ttl     <value>    minimum TTL distance (128/64 - TTL) for which to send Fake Request
+                          in --set-ttl and --auto-ttl modes.
  --wrong-chksum           activate Fake Request Mode and send it with incorrect TCP checksum.
                           May not work in a VM or with some routers, but is safer than set-ttl.
+ --wrong-seq              activate Fake Request Mode and send it with TCP SEQ/ACK in the past.
+ --native-frag            fragment (split) the packets by sending them in smaller packets, without
+                          shrinking the Window Size. Works faster (does not slow down the connection)
+                          and better.
+ --reverse-frag           fragment (split) the packets just as --native-frag, but send them in the
+                          reversed order. Works with the websites which could not handle segmented
+                          HTTPS TLS ClientHello (because they receive the TCP flow "combined").
+ --max-payload [value]    packets with TCP payload data more than [value] won't be processed.
+                          Use this option to reduce CPU usage by skipping huge amount of data
+                          (like file transfers) in already established sessions.
+                          May skip some huge HTTP requests from being processed.
+                          Default (if set): --max-payload 1200.
 
- -1          -p -r -s -f 2 -k 2 -n -e 2 (most compatible mode, default)
+
+LEGACY modesets:
+ -1          -p -r -s -f 2 -k 2 -n -e 2 (most compatible mode)
  -2          -p -r -s -f 2 -k 2 -n -e 40 (better speed for HTTPS yet still compatible)
  -3          -p -r -s -e 40 (better speed for HTTP and HTTPS)
  -4          -p -r -s (best speed)
+
+Modern modesets (more stable, more compatible, faster):
+ -5          -f 2 -e 2 --auto-ttl --reverse-frag --max-payload (this is the default)
+ -6          -f 2 -e 2 --wrong-seq --reverse-frag --max-payload
 ```
 
-To check if your ISP's DPI could be circumvented, run `3_all_dnsredir_hardcore.cmd` first. This is the most hardcore mode which will show if this program is suitable for your ISP and DPI vendor at all. If you can open blocked websites with this mode, it means your ISP has DPI which can be circumvented. This is the slowest and prone to break websites mode, but suitable for most DPI.
+To check if your ISP's DPI could be circumvented, first make sure that your provider does not poison DNS answers by enabling "Secure DNS (DNS over HTTPS)" option in your browser.
 
-Try `goodbyedpi -1` to see if it works too.
+* **Chrome**: Settings → [Privacy and security](chrome://settings/security) → Use secure DNS → With: NextDNS
+* **Firefox**: [Settings](about:preferences) → Network Settings → Enable DNS over HTTPS → Use provider: NextDNS
 
-Then try `goodbyedpi.exe -2`. It should be faster for HTTPS sites. Mode `-3` speed ups HTTP websites.
+Then run the `goodbyedpi.exe` executable without any options. If it works — congratulations! You can use it as-is or configure further, for example by using `--blacklist` option if the list of blocked websites is known and available for your country.
 
-Use `goodbyedpi.exe -4` if it works for your ISP's DPI. This is the fastest mode but not compatible with every DPI.
+If your provider intercepts DNS requests, you may want to use `--dns-addr` option to a public DNS resover running on non-standard port (such as Yandex DNS `77.88.8.8:1253`) or configure DNS over HTTPS/TLS using third-party applications.
+
+Check the .cmd scripts and modify it according to your preference and network conditions.
 
 # How does it work
 
@@ -68,7 +107,7 @@ Active DPI is more tricky to fool. Currently the software uses 7 methods to circ
 * Removing space between header name and value in `Host` header
 * Adding additional space between HTTP Method (GET, POST etc) and URI
 * Mixing case of Host header value
-* Sending fake HTTP/HTTPS packets with low Time-To-Live value or incorrect checksum to fool DPI and prevent delivering them to the destination
+* Sending fake HTTP/HTTPS packets with low Time-To-Live value, incorrect checksum or incorrect TCP Sequence/Acknowledgement numbers to fool DPI and prevent delivering them to the destination
 
 These methods should not break any website as they're fully compatible with TCP and HTTP standards, yet it's sufficient to prevent DPI data classification and to circumvent censorship. Additional space may break some websites, although it's acceptable by HTTP/1.1 specification (see 19.3 Tolerant Applications).
 
@@ -88,14 +127,15 @@ And for x86_64:
 
 # How to install as Windows Service
 
-Use `service_install_russia_blacklist.cmd`, `service_install_russia_blacklist_dnsredir.cmd` and `service_remove.cmd` scripts.  
+Check examples in `service_install_russia_blacklist.cmd`, `service_install_russia_blacklist_dnsredir.cmd` and `service_remove.cmd` scripts.
+
 Modify them according to your own needs.
 
 # Known issues
 
 * Horribly outdated Windows 7 installations are not able to load WinDivert driver due to missing support for SHA256 digital signatures. Install KB3033929 [x86](https://www.microsoft.com/en-us/download/details.aspx?id=46078)/[x64](https://www.microsoft.com/en-us/download/details.aspx?id=46148), or better, update the whole system using Windows Update.
-* Some SSL/TLS stacks unable to process fragmented ClientHello packets, and HTTPS websites won't open. Bug: [#4](https://github.com/ValdikSS/GoodbyeDPI/issues/4), [#64](https://github.com/ValdikSS/GoodbyeDPI/issues/64).
-* ESET Antivirus is incompatible with WinDivert driver [#91](https://github.com/ValdikSS/GoodbyeDPI/issues/91). This is most probably antivirus bug, not WinDivert.
+* ~~Some SSL/TLS stacks unable to process fragmented ClientHello packets, and HTTPS websites won't open. Bug: [#4](https://github.com/ValdikSS/GoodbyeDPI/issues/4), [#64](https://github.com/ValdikSS/GoodbyeDPI/issues/64).~~ Fragmentation issues are fixed in v0.1.7.
+* ~~ESET Antivirus is incompatible with WinDivert driver [#91](https://github.com/ValdikSS/GoodbyeDPI/issues/91). This is most probably antivirus bug, not WinDivert.~~
 
 
 # Similar projects
@@ -105,6 +145,7 @@ Modify them according to your own needs.
 - **[DPITunnel](https://github.com/zhenyolka/DPITunnel)** by @zhenyolka (for Android).
 - **[PowerTunnel](https://github.com/krlvm/PowerTunnel)** by @krlvm (for Windows, MacOS and Linux).
 - **[PowerTunnel for Android](https://github.com/krlvm/PowerTunnel-Android)** by @krlvm (for Android).
+- **[SpoofDPI](https://github.com/xvzc/SpoofDPI)** by @xvzc (for macOS and Linux)
 
 # Kudos
 
