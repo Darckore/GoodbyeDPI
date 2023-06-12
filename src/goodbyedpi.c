@@ -23,7 +23,7 @@
 // My mingw installation does not load inet_pton definition for some reason
 WINSOCK_API_LINKAGE INT WSAAPI inet_pton(INT Family, LPCSTR pStringBuf, PVOID pAddr);
 
-#define GOODBYEDPI_VERSION "v0.2.1"
+#define GOODBYEDPI_VERSION "v0.2.2"
 
 #define die() do { sleep(20); exit(EXIT_FAILURE); } while (0)
 
@@ -119,8 +119,8 @@ WINSOCK_API_LINKAGE INT WSAAPI inet_pton(INT Family, LPCSTR pStringBuf, PVOID pA
             } \
             else if (ttl_min_nhops) { \
                 /* If not Auto TTL mode but --min-ttl is set */ \
-                if (tcp_get_auto_ttl(tcp_conn_info.ttl, 0, 0, ttl_min_nhops, 0)) { \
-                    /* Send only if nhops > min_ttl */ \
+                if (!tcp_get_auto_ttl(tcp_conn_info.ttl, 0, 0, ttl_min_nhops, 0)) { \
+                    /* Send only if nhops >= min_ttl */ \
                     should_send_fake = 0; \
                 } \
             } \
@@ -216,7 +216,8 @@ static void add_ip_id_str(int id) {
 
 static void add_maxpayloadsize_str(unsigned short maxpayload) {
     char *newstr;
-    const char *maxpayloadsize_str = "and (tcp.PayloadLength ? tcp.PayloadLength < %hu : true)";
+    /* 0x47455420 is "GET ", 0x504F5354 is "POST", big endian. */
+    const char *maxpayloadsize_str = "and (tcp.PayloadLength ? tcp.PayloadLength < %hu or tcp.Payload32[0] == 0x47455420 or tcp.Payload32[0] == 0x504F5354 : true)";
     char *addfilter = malloc(strlen(maxpayloadsize_str) + 16);
 
     sprintf(addfilter, maxpayloadsize_str, maxpayload);
@@ -309,6 +310,7 @@ static HANDLE init(char *filter, UINT64 flags) {
 
 static int deinit(HANDLE handle) {
     if (handle) {
+        WinDivertShutdown(handle, WINDIVERT_SHUTDOWN_BOTH);
         WinDivertClose(handle);
         return TRUE;
     }
@@ -472,7 +474,7 @@ static void send_native_fragment(HANDLE w_filter, WINDIVERT_ADDRESS addr,
                         PWINDIVERT_TCPHDR ppTcpHdr,
                         unsigned int fragment_size, int step) {
     char packet_bak[MAX_PACKET_SIZE];
-    memcpy(&packet_bak, packet, packetLen);
+    memcpy(packet_bak, packet, packetLen);
     UINT orig_packetLen = packetLen;
 
     if (fragment_size >= packet_dataLen) {
@@ -518,8 +520,8 @@ static void send_native_fragment(HANDLE w_filter, WINDIVERT_ADDRESS addr,
         ppTcpHdr->SeqNum = htonl(ntohl(ppTcpHdr->SeqNum) + fragment_size);
     }
 
-    addr.PseudoIPChecksum = 0;
-    addr.PseudoTCPChecksum = 0;
+    addr.IPChecksum = 0;
+    addr.TCPChecksum = 0;
 
     WinDivertHelperCalcChecksums(
         packet, packetLen, &addr, 0
@@ -527,9 +529,9 @@ static void send_native_fragment(HANDLE w_filter, WINDIVERT_ADDRESS addr,
     WinDivertSend(
         w_filter, packet,
         packetLen,
-        &addr, NULL
+        NULL, &addr
     );
-    memcpy(packet, &packet_bak, orig_packetLen);
+    memcpy(packet, packet_bak, orig_packetLen);
     //printf("Sent native fragment of %d size (step%d)\n", packetLen, step);
 }
 
@@ -805,6 +807,7 @@ int main(int argc, char *argv[]) {
                 do_allow_no_sni = 1;
                 break;
             case '$': // --set-ttl
+                do_auto_ttl = auto_ttl_1 = auto_ttl_2 = auto_ttl_max = 0;
                 do_fake_packet = 1;
                 ttl_of_fake_packet = atoub(optarg, "Set TTL parameter error!");
                 break;
@@ -984,7 +987,7 @@ int main(int argc, char *argv[]) {
            do_dnsv4_redirect,                  /* 13 */
            do_dnsv6_redirect,                  /* 14 */
            do_allow_no_sni,                    /* 15 */
-           ttl_of_fake_packet ? "fixed" : (do_auto_ttl ? "auto" : "disabled"),  /* 16 */
+           do_auto_ttl ? "auto" : (do_fake_packet ? "fixed" : "disabled"),  /* 16 */
                ttl_of_fake_packet, do_auto_ttl ? auto_ttl_1 : 0, do_auto_ttl ? auto_ttl_2 : 0,
                do_auto_ttl ? auto_ttl_max : 0, ttl_min_nhops,
            do_wrong_chksum, /* 17 */
@@ -1001,7 +1004,7 @@ int main(int argc, char *argv[]) {
     if (do_native_frag && !(do_fragment_http || do_fragment_https)) {
         puts("\nERROR: Native fragmentation is enabled but fragment sizes are not set.\n"
              "Fragmentation has no effect.");
-        exit(EXIT_FAILURE);
+        die();
     }
 
     if (max_payload_size)
@@ -1038,8 +1041,8 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, sigint_handler);
 
     while (1) {
-        if (WinDivertRecv(w_filter, packet, sizeof(packet), &addr, &packetLen)) {
-            debug("Got %s packet, len=%d!\n", addr.Direction ? "inbound" : "outbound",
+        if (WinDivertRecv(w_filter, packet, sizeof(packet), &packetLen, &addr)) {
+            debug("Got %s packet, len=%d!\n", addr.Outbound ? "outbound" : "inbound",
                    packetLen);
             should_reinject = 1;
             should_recalc_checksum = 0;
@@ -1052,35 +1055,35 @@ int main(int argc, char *argv[]) {
             packet_type = unknown;
 
             // Parse network packet and set it's type
-            if ((packet_v4 = WinDivertHelperParsePacket(packet, packetLen, &ppIpHdr,
-                NULL, NULL, NULL, &ppTcpHdr, NULL, &packet_data, &packet_dataLen)))
+            if (WinDivertHelperParsePacket(packet, packetLen, &ppIpHdr,
+                &ppIpV6Hdr, NULL, NULL, NULL, &ppTcpHdr, &ppUdpHdr, &packet_data, &packet_dataLen,
+                NULL, NULL))
             {
-                packet_type = ipv4_tcp_data;
-            }
-            else if ((packet_v6 = WinDivertHelperParsePacket(packet, packetLen, NULL,
-                &ppIpV6Hdr, NULL, NULL, &ppTcpHdr, NULL, &packet_data, &packet_dataLen)))
-            {
-                packet_type = ipv6_tcp_data;
-            }
-            else if ((packet_v4 = WinDivertHelperParsePacket(packet, packetLen, &ppIpHdr,
-                NULL, NULL, NULL, &ppTcpHdr, NULL, NULL, NULL)))
-            {
-                packet_type = ipv4_tcp;
-            }
-            else if ((packet_v6 = WinDivertHelperParsePacket(packet, packetLen, NULL,
-                &ppIpV6Hdr, NULL, NULL, &ppTcpHdr, NULL, NULL, NULL)))
-            {
-                packet_type = ipv6_tcp;
-            }
-            else if ((packet_v4 = WinDivertHelperParsePacket(packet, packetLen, &ppIpHdr,
-                NULL, NULL, NULL, NULL, &ppUdpHdr, &packet_data, &packet_dataLen)))
-            {
-                packet_type = ipv4_udp_data;
-            }
-            else if ((packet_v6 = WinDivertHelperParsePacket(packet, packetLen, NULL,
-                &ppIpV6Hdr, NULL, NULL, NULL, &ppUdpHdr, &packet_data, &packet_dataLen)))
-            {
-                packet_type = ipv6_udp_data;
+                if (ppIpHdr) {
+                    packet_v4 = 1;
+                    if (ppTcpHdr) {
+                        packet_type = ipv4_tcp;
+                        if (packet_data) {
+                            packet_type = ipv4_tcp_data;
+                        }
+                    }
+                    else if (ppUdpHdr && packet_data) {
+                        packet_type = ipv4_udp_data;
+                    }
+                }
+
+                else if (ppIpV6Hdr) {
+                    packet_v6 = 1;
+                    if (ppTcpHdr) {
+                        packet_type = ipv6_tcp;
+                        if (packet_data) {
+                            packet_type = ipv6_tcp_data;
+                        }
+                    }
+                    else if (ppUdpHdr && packet_data) {
+                        packet_type = ipv6_udp_data;
+                    }
+                }
             }
 
             debug("packet_type: %d, packet_v4: %d, packet_v6: %d\n", packet_type, packet_v4, packet_v6);
@@ -1090,7 +1093,7 @@ int main(int argc, char *argv[]) {
                 /* Got a TCP packet WITH DATA */
 
                 /* Handle INBOUND packet with data and find HTTP REDIRECT in there */
-                if (addr.Direction == WINDIVERT_DIRECTION_INBOUND && packet_dataLen > 16) {
+                if (!addr.Outbound && packet_dataLen > 16) {
                     /* If INBOUND packet with DATA (tcp.Ack) */
 
                     /* Drop packets from filter with HTTP 30x Redirect */
@@ -1114,7 +1117,7 @@ int main(int argc, char *argv[]) {
                 /* Handle OUTBOUND packet on port 443, search for something that resembles
                  * TLS handshake, send fake request.
                  */
-                else if (addr.Direction == WINDIVERT_DIRECTION_OUTBOUND &&
+                else if (addr.Outbound &&
                         ((do_fragment_https ? packet_dataLen == https_fragment_size : 0) ||
                          packet_dataLen > 16) &&
                          ppTcpHdr->DstPort != htons(80) &&
@@ -1144,7 +1147,7 @@ int main(int argc, char *argv[]) {
                             char lsni[HOST_MAXLEN + 1] = {0};
                             extract_sni(packet_data, packet_dataLen,
                                         &host_addr, &host_len);
-                            memcpy(&lsni, host_addr, host_len);
+                            memcpy(lsni, host_addr, host_len);
                             printf("Blocked HTTPS website SNI: %s\n", lsni);
 #endif
                             if (do_fake_packet) {
@@ -1158,7 +1161,7 @@ int main(int argc, char *argv[]) {
                     }
                 }
                 /* Handle OUTBOUND packet on port 80, search for Host header */
-                else if (addr.Direction == WINDIVERT_DIRECTION_OUTBOUND && 
+                else if (addr.Outbound && 
                         packet_dataLen > 16 &&
                         (do_http_allports ? 1 : (ppTcpHdr->DstPort == htons(80))) &&
                         find_http_method_end(packet_data,
@@ -1179,7 +1182,7 @@ int main(int argc, char *argv[]) {
                         host_len = hdr_value_len;
 #ifdef DEBUG
                         char lhost[HOST_MAXLEN + 1] = {0};
-                        memcpy(&lhost, host_addr, host_len);
+                        memcpy(lhost, host_addr, host_len);
                         printf("Blocked HTTP website Host: %s\n", lhost);
 #endif
 
@@ -1302,7 +1305,7 @@ int main(int argc, char *argv[]) {
             /* Else if we got TCP packet without data */
             else if (packet_type == ipv4_tcp || packet_type == ipv6_tcp) {
                 /* If we got INBOUND SYN+ACK packet */
-                if (addr.Direction == WINDIVERT_DIRECTION_INBOUND &&
+                if (!addr.Outbound &&
                     ppTcpHdr->Syn == 1 && ppTcpHdr->Ack == 1) {
                     //printf("Changing Window Size!\n");
                     /*
@@ -1342,7 +1345,7 @@ int main(int argc, char *argv[]) {
             else if ((do_dnsv4_redirect && (packet_type == ipv4_udp_data)) ||
                      (do_dnsv6_redirect && (packet_type == ipv6_udp_data)))
             {
-                if (addr.Direction == WINDIVERT_DIRECTION_INBOUND) {
+                if (!addr.Outbound) {
                     if ((packet_v4 && dns_handle_incoming(&ppIpHdr->DstAddr, ppUdpHdr->DstPort,
                                         packet_data, packet_dataLen,
                                         &dns_conn_info, 0))
@@ -1372,7 +1375,7 @@ int main(int argc, char *argv[]) {
                     }
                 }
 
-                else if (addr.Direction == WINDIVERT_DIRECTION_OUTBOUND) {
+                else if (addr.Outbound) {
                     if ((packet_v4 && dns_handle_outgoing(&ppIpHdr->SrcAddr, ppUdpHdr->SrcPort,
                                         &ppIpHdr->DstAddr, ppUdpHdr->DstPort,
                                         packet_data, packet_dataLen, 0))
@@ -1410,7 +1413,7 @@ int main(int argc, char *argv[]) {
                 if (should_recalc_checksum) {
                     WinDivertHelperCalcChecksums(packet, packetLen, &addr, (UINT64)0LL);
                 }
-                WinDivertSend(w_filter, packet, packetLen, &addr, NULL);
+                WinDivertSend(w_filter, packet, packetLen, NULL, &addr);
             }
         }
         else {
