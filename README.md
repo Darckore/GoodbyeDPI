@@ -22,6 +22,7 @@ Download [latest version from Releases page](https://github.com/ValdikSS/Goodbye
 ```
 Usage: goodbyedpi.exe [OPTION...]
  -p          block passive DPI
+ -q          block QUIC/HTTP3
  -r          replace Host with hoSt
  -s          remove space between host header and its value
  -m          mix Host header case (test.com -> tEsT.cOm)
@@ -43,6 +44,7 @@ Usage: goodbyedpi.exe [OPTION...]
                           supplied text file (HTTP Host/TLS SNI).
                           This option can be supplied multiple times.
  --allow-no-sni           perform circumvention if TLS SNI can't be detected with --blacklist enabled.
+ --frag-by-sni            if SNI is detected in TLS packet, fragment the packet right before SNI value.
  --set-ttl     <value>    activate Fake Request Mode and send it with supplied TTL value.
                           DANGEROUS! May break websites in unexpected ways. Use with care (or --blacklist).
  --auto-ttl    [a1-a2-m]  activate Fake Request Mode, automatically detect TTL and decrease
@@ -76,8 +78,13 @@ LEGACY modesets:
  -4          -p -r -s (best speed)
 
 Modern modesets (more stable, more compatible, faster):
- -5          -f 2 -e 2 --auto-ttl --reverse-frag --max-payload (this is the default)
+ -5          -f 2 -e 2 --auto-ttl --reverse-frag --max-payload
  -6          -f 2 -e 2 --wrong-seq --reverse-frag --max-payload
+ -7          -f 2 -e 2 --wrong-chksum --reverse-frag --max-payload
+ -8          -f 2 -e 2 --wrong-seq --wrong-chksum --reverse-frag --max-payload
+ -9          -f 2 -e 2 --wrong-seq --wrong-chksum --reverse-frag --max-payload -q (this is the default)
+
+ Note: combination of --wrong-seq and --wrong-chksum generates two different fake packets.
 ```
 
 To check if your ISP's DPI could be circumvented, first make sure that your provider does not poison DNS answers by enabling "Secure DNS (DNS over HTTPS)" option in your browser.
@@ -87,7 +94,7 @@ To check if your ISP's DPI could be circumvented, first make sure that your prov
 
 Then run the `goodbyedpi.exe` executable without any options. If it works — congratulations! You can use it as-is or configure further, for example by using `--blacklist` option if the list of blocked websites is known and available for your country.
 
-If your provider intercepts DNS requests, you may want to use `--dns-addr` option to a public DNS resover running on non-standard port (such as Yandex DNS `77.88.8.8:1253`) or configure DNS over HTTPS/TLS using third-party applications.
+If your provider intercepts DNS requests, you may want to use `--dns-addr` option to a public DNS resolver running on non-standard port (such as Yandex DNS `77.88.8.8:1253`) or configure DNS over HTTPS/TLS using third-party applications.
 
 Check the .cmd scripts and modify it according to your preference and network conditions.
 
@@ -140,14 +147,15 @@ Modify them according to your own needs.
 
 # Similar projects
 
-- **[zapret](https://github.com/bol-van/zapret)** by @bol-van (for Linux)
+- **[zapret](https://github.com/bol-van/zapret)** by @bol-van (for MacOS, Linux and Windows)
 - **[Green Tunnel](https://github.com/SadeghHayeri/GreenTunnel)** by @SadeghHayeri (for MacOS, Linux and Windows)
-- **[DPI Tunnel CLI](https://github.com/zhenyolka/DPITunnel-cli)** by @zhenyolka (for Linux and routers)
-- **[DPI Tunnel for Android](https://github.com/zhenyolka/DPITunnel-android)** by @zhenyolka (for Android)
+- **[DPI Tunnel CLI](https://github.com/nomoresat/DPITunnel-cli)** by @zhenyolka (for Linux and routers)
+- **[DPI Tunnel for Android](https://github.com/nomoresat/DPITunnel-android)** by @zhenyolka (for Android)
 - **[PowerTunnel](https://github.com/krlvm/PowerTunnel)** by @krlvm (for Windows, MacOS and Linux)
 - **[PowerTunnel for Android](https://github.com/krlvm/PowerTunnel-Android)** by @krlvm (for Android)
 - **[SpoofDPI](https://github.com/xvzc/SpoofDPI)** by @xvzc (for macOS and Linux)
 - **[GhosTCP](https://github.com/macronut/ghostcp)** by @macronut (for Windows)
+- **[ByeDPI](https://github.com/hufrea/byedpi)** for Linux/Windows + **[ByeDPIAndroid](https://github.com/dovecoteescapee/ByeDPIAndroid/)** for Android (no root)
 
 # Kudos
 

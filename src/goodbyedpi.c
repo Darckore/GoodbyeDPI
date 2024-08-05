@@ -23,7 +23,7 @@
 // My mingw installation does not load inet_pton definition for some reason
 WINSOCK_API_LINKAGE INT WSAAPI inet_pton(INT Family, LPCSTR pStringBuf, PVOID pAddr);
 
-#define GOODBYEDPI_VERSION "v0.2.2"
+#define GOODBYEDPI_VERSION "v0.2.3"
 
 #define die() do { sleep(20); exit(EXIT_FAILURE); } while (0)
 
@@ -78,6 +78,9 @@ WINSOCK_API_LINKAGE INT WSAAPI inet_pton(INT Family, LPCSTR pStringBuf, PVOID pA
          "(tcp.DstPort == 80 or tcp.DstPort == 443) and tcp.Ack and " \
          "(" DIVERT_NO_LOCALNETSv4_DST " or " DIVERT_NO_LOCALNETSv6_DST "))" \
         "))"
+#define FILTER_PASSIVE_BLOCK_QUIC "outbound and !impostor and !loopback and udp " \
+        "and udp.DstPort == 443 and udp.PayloadLength >= 1200 " \
+        "and udp.Payload[0] >= 0xC0 and udp.Payload32[1b] == 0x01"
 #define FILTER_PASSIVE_STRING_TEMPLATE "inbound and ip and tcp and " \
         "!impostor and !loopback and " \
         "((ip.Id <= 0xF and ip.Id >= 0x0) " IPID_TEMPLATE ") and " \
@@ -162,6 +165,7 @@ static struct option long_options[] = {
     {"dns-verb",    no_argument,       0,  'v' },
     {"blacklist",   required_argument, 0,  'b' },
     {"allow-no-sni",no_argument,       0,  ']' },
+    {"frag-by-sni", no_argument,       0,  '>' },
     {"ip-id",       required_argument, 0,  'i' },
     {"set-ttl",     required_argument, 0,  '$' },
     {"min-ttl",     required_argument, 0,  '[' },
@@ -217,7 +221,10 @@ static void add_ip_id_str(int id) {
 static void add_maxpayloadsize_str(unsigned short maxpayload) {
     char *newstr;
     /* 0x47455420 is "GET ", 0x504F5354 is "POST", big endian. */
-    const char *maxpayloadsize_str = "and (tcp.PayloadLength ? tcp.PayloadLength < %hu or tcp.Payload32[0] == 0x47455420 or tcp.Payload32[0] == 0x504F5354 : true)";
+    const char *maxpayloadsize_str =
+        "and (tcp.PayloadLength ? tcp.PayloadLength < %hu " \
+          "or tcp.Payload32[0] == 0x47455420 or tcp.Payload32[0] == 0x504F5354 " \
+          "or (tcp.Payload[0] == 0x16 and tcp.Payload[1] == 0x03 and tcp.Payload[2] <= 0x03): true)";
     char *addfilter = malloc(strlen(maxpayloadsize_str) + 16);
 
     sprintf(addfilter, maxpayloadsize_str, maxpayload);
@@ -293,10 +300,27 @@ static HANDLE init(char *filter, UINT64 flags) {
                   FORMAT_MESSAGE_IGNORE_INSERTS,
                   NULL, errorcode, MAKELANGID(LANG_ENGLISH, SUBLANG_DEFAULT),
                   (LPTSTR)&errormessage, 0, NULL);
-    printf("Error opening filter: %s", errormessage);
+    printf("Error opening filter: %d %s\n", errorcode, errormessage);
     LocalFree(errormessage);
-    if (errorcode == 577)
-        printf("Windows Server 2016 systems must have secure boot disabled to be "
+    if (errorcode == 2)
+        printf("The driver files WinDivert32.sys or WinDivert64.sys were not found.\n");
+    else if (errorcode == 654)
+        printf("An incompatible version of the WinDivert driver is currently loaded.\n"
+               "Please unload it with the following commands ran as administrator:\n\n"
+               "sc stop windivert\n"
+               "sc delete windivert\n"
+               "sc stop windivert14"
+               "sc delete windivert14\n");
+    else if (errorcode == 1275)
+        printf("This error occurs for various reasons, including:\n"
+               "the WinDivert driver is blocked by security software; or\n"
+               "you are using a virtualization environment that does not support drivers.\n");
+    else if (errorcode == 1753)
+        printf("This error occurs when the Base Filtering Engine service has been disabled.\n"
+               "Enable Base Filtering Engine service.\n");
+    else if (errorcode == 577)
+        printf("Could not load driver due to invalid digital signature.\n"
+               "Windows Server 2016 systems must have secure boot disabled to be \n"
                "able to load WinDivert driver.\n"
                "Windows 7 systems must be up-to-date or at least have KB3033929 installed.\n"
                "https://www.microsoft.com/en-us/download/details.aspx?id=46078\n\n"
@@ -558,7 +582,8 @@ int main(int argc, char *argv[]) {
     conntrack_info_t dns_conn_info;
     tcp_conntrack_info_t tcp_conn_info;
 
-    int do_passivedpi = 0, do_fragment_http = 0,
+    int do_passivedpi = 0, do_block_quic = 0,
+        do_fragment_http = 0,
         do_fragment_http_persistent = 0,
         do_fragment_http_persistent_nowait = 0,
         do_fragment_https = 0, do_host = 0,
@@ -568,6 +593,7 @@ int main(int argc, char *argv[]) {
         do_dnsv4_redirect = 0, do_dnsv6_redirect = 0,
         do_dns_verb = 0, do_tcp_verb = 0, do_blacklist = 0,
         do_allow_no_sni = 0,
+        do_fragment_by_sni = 0,
         do_fake_packet = 0,
         do_auto_ttl = 0,
         do_wrong_chksum = 0,
@@ -629,17 +655,19 @@ int main(int argc, char *argv[]) {
     );
 
     if (argc == 1) {
-        /* enable mode -5 by default */
+        /* enable mode -9 by default */
         do_fragment_http = do_fragment_https = 1;
         do_reverse_frag = do_native_frag = 1;
         http_fragment_size = https_fragment_size = 2;
         do_fragment_http_persistent = do_fragment_http_persistent_nowait = 1;
         do_fake_packet = 1;
-        do_auto_ttl = 1;
+        do_wrong_chksum = 1;
+        do_wrong_seq = 1;
+        do_block_quic = 1;
         max_payload_size = 1200;
     }
 
-    while ((opt = getopt_long(argc, argv, "123456prsaf:e:mwk:n", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "123456789pqrsaf:e:mwk:n", long_options, NULL)) != -1) {
         switch (opt) {
             case '1':
                 do_passivedpi = do_host = do_host_removespace \
@@ -680,8 +708,26 @@ int main(int argc, char *argv[]) {
                 do_wrong_seq = 1;
                 max_payload_size = 1200;
                 break;
+            case '9': // +7+8
+                do_block_quic = 1;
+                // fall through
+            case '8': // +7
+                do_wrong_seq = 1;
+                // fall through
+            case '7':
+                do_fragment_http = do_fragment_https = 1;
+                do_reverse_frag = do_native_frag = 1;
+                http_fragment_size = https_fragment_size = 2;
+                do_fragment_http_persistent = do_fragment_http_persistent_nowait = 1;
+                do_fake_packet = 1;
+                do_wrong_chksum = 1;
+                max_payload_size = 1200;
+                break;
             case 'p':
                 do_passivedpi = 1;
+                break;
+            case 'q':
+                do_block_quic = 1;
                 break;
             case 'r':
                 do_host = 1;
@@ -806,6 +852,9 @@ int main(int argc, char *argv[]) {
             case ']': // --allow-no-sni
                 do_allow_no_sni = 1;
                 break;
+            case '>': // --frag-by-sni
+                do_fragment_by_sni = 1;
+                break;
             case '$': // --set-ttl
                 do_auto_ttl = auto_ttl_1 = auto_ttl_2 = auto_ttl_max = 0;
                 do_fake_packet = 1;
@@ -879,6 +928,7 @@ int main(int argc, char *argv[]) {
             default:
                 puts("Usage: goodbyedpi.exe [OPTION...]\n"
                 " -p          block passive DPI\n"
+                " -q          block QUIC/HTTP3\n"
                 " -r          replace Host with hoSt\n"
                 " -s          remove space between host header and its value\n"
                 " -a          additional space between Method and Request-URI (enables -s, may break sites)\n"
@@ -899,6 +949,7 @@ int main(int argc, char *argv[]) {
                 "                          supplied text file (HTTP Host/TLS SNI).\n"
                 "                          This option can be supplied multiple times.\n"
                 " --allow-no-sni           perform circumvention if TLS SNI can't be detected with --blacklist enabled.\n"
+                " --frag-by-sni            if SNI is detected in TLS packet, fragment the packet right before SNI value.\n"
                 " --set-ttl     <value>    activate Fake Request Mode and send it with supplied TTL value.\n"
                 "                          DANGEROUS! May break websites in unexpected ways. Use with care (or --blacklist).\n"
                 " --auto-ttl    [a1-a2-m]  activate Fake Request Mode, automatically detect TTL and decrease\n"
@@ -932,8 +983,13 @@ int main(int argc, char *argv[]) {
                 " -4          -p -r -s (best speed)"
                 "\n"
                 "Modern modesets (more stable, more compatible, faster):\n"
-                " -5          -f 2 -e 2 --auto-ttl --reverse-frag --max-payload (this is the default)\n"
-                " -6          -f 2 -e 2 --wrong-seq --reverse-frag --max-payload\n");
+                " -5          -f 2 -e 2 --auto-ttl --reverse-frag --max-payload\n"
+                " -6          -f 2 -e 2 --wrong-seq --reverse-frag --max-payload\n"
+                " -7          -f 2 -e 2 --wrong-chksum --reverse-frag --max-payload\n"
+                " -8          -f 2 -e 2 --wrong-seq --wrong-chksum --reverse-frag --max-payload\n"
+                " -9          -f 2 -e 2 --wrong-seq --wrong-chksum --reverse-frag --max-payload -q (this is the default)\n\n"
+                "Note: combination of --wrong-seq and --wrong-chksum generates two different fake packets.\n"
+                );
                 exit(EXIT_FAILURE);
         }
     }
@@ -954,45 +1010,48 @@ int main(int argc, char *argv[]) {
     }
 
     printf("Block passive: %d\n"                    /* 1 */
+           "Block QUIC/HTTP3: %d\n"                 /* 1 */
            "Fragment HTTP: %u\n"                    /* 2 */
            "Fragment persistent HTTP: %u\n"         /* 3 */
            "Fragment HTTPS: %u\n"                   /* 4 */
-           "Native fragmentation (splitting): %d\n" /* 5 */
-           "Fragments sending in reverse: %d\n"     /* 6 */
-           "hoSt: %d\n"                             /* 7 */
-           "Host no space: %d\n"                    /* 8 */
-           "Additional space: %d\n"                 /* 9 */
-           "Mix Host: %d\n"                         /* 10 */
-           "HTTP AllPorts: %d\n"                    /* 11 */
-           "HTTP Persistent Nowait: %d\n"           /* 12 */
-           "DNS redirect: %d\n"                     /* 13 */
-           "DNSv6 redirect: %d\n"                   /* 14 */
-           "Allow missing SNI: %d\n"                /* 15 */
-           "Fake requests, TTL: %s (fixed: %hu, auto: %hu-%hu-%hu, min distance: %hu)\n"  /* 16 */
-           "Fake requests, wrong checksum: %d\n"    /* 17 */
-           "Fake requests, wrong SEQ/ACK: %d\n"     /* 18 */
-           "Max payload size: %hu\n",               /* 19 */
-           do_passivedpi,                                         /* 1 */
+           "Fragment by SNI: %u\n"                  /* 5 */
+           "Native fragmentation (splitting): %d\n" /* 6 */
+           "Fragments sending in reverse: %d\n"     /* 7 */
+           "hoSt: %d\n"                             /* 8 */
+           "Host no space: %d\n"                    /* 9 */
+           "Additional space: %d\n"                 /* 10 */
+           "Mix Host: %d\n"                         /* 11 */
+           "HTTP AllPorts: %d\n"                    /* 12 */
+           "HTTP Persistent Nowait: %d\n"           /* 13 */
+           "DNS redirect: %d\n"                     /* 14 */
+           "DNSv6 redirect: %d\n"                   /* 15 */
+           "Allow missing SNI: %d\n"                /* 16 */
+           "Fake requests, TTL: %s (fixed: %hu, auto: %hu-%hu-%hu, min distance: %hu)\n"  /* 17 */
+           "Fake requests, wrong checksum: %d\n"    /* 18 */
+           "Fake requests, wrong SEQ/ACK: %d\n"     /* 19 */
+           "Max payload size: %hu\n",               /* 20 */
+           do_passivedpi, do_block_quic,                          /* 1 */
            (do_fragment_http ? http_fragment_size : 0),           /* 2 */
            (do_fragment_http_persistent ? http_fragment_size : 0),/* 3 */
            (do_fragment_https ? https_fragment_size : 0),         /* 4 */
-           do_native_frag,        /* 5 */
-           do_reverse_frag,       /* 6 */
-           do_host,               /* 7 */
-           do_host_removespace,   /* 8 */
-           do_additional_space,   /* 9 */
-           do_host_mixedcase,     /* 10 */
-           do_http_allports,      /* 11 */
-           do_fragment_http_persistent_nowait, /* 12 */
-           do_dnsv4_redirect,                  /* 13 */
-           do_dnsv6_redirect,                  /* 14 */
-           do_allow_no_sni,                    /* 15 */
-           do_auto_ttl ? "auto" : (do_fake_packet ? "fixed" : "disabled"),  /* 16 */
+           do_fragment_by_sni,    /* 5 */
+           do_native_frag,        /* 6 */
+           do_reverse_frag,       /* 7 */
+           do_host,               /* 8 */
+           do_host_removespace,   /* 9 */
+           do_additional_space,   /* 10 */
+           do_host_mixedcase,     /* 11 */
+           do_http_allports,      /* 12 */
+           do_fragment_http_persistent_nowait, /* 13 */
+           do_dnsv4_redirect,                  /* 14 */
+           do_dnsv6_redirect,                  /* 15 */
+           do_allow_no_sni,                    /* 16 */
+           do_auto_ttl ? "auto" : (do_fake_packet ? "fixed" : "disabled"),  /* 17 */
                ttl_of_fake_packet, do_auto_ttl ? auto_ttl_1 : 0, do_auto_ttl ? auto_ttl_2 : 0,
                do_auto_ttl ? auto_ttl_max : 0, ttl_min_nhops,
-           do_wrong_chksum, /* 17 */
-           do_wrong_seq,    /* 18 */
-           max_payload_size /* 19 */
+           do_wrong_chksum, /* 18 */
+           do_wrong_seq,    /* 19 */
+           max_payload_size /* 20 */
           );
 
     if (do_fragment_http && http_fragment_size > 2 && !do_native_frag) {
@@ -1023,6 +1082,15 @@ int main(int argc, char *argv[]) {
         filter_num++;
     }
 
+    if (do_block_quic) {
+        filters[filter_num] = init(
+            FILTER_PASSIVE_BLOCK_QUIC,
+            WINDIVERT_FLAG_DROP);
+        if (filters[filter_num] == NULL)
+            die();
+        filter_num++;
+    }
+
     /* 
      * IPv4 & IPv6 filter for inbound HTTP redirection packets and
      * active DPI circumvention
@@ -1046,6 +1114,7 @@ int main(int argc, char *argv[]) {
                    packetLen);
             should_reinject = 1;
             should_recalc_checksum = 0;
+            sni_ok = 0;
 
             ppIpHdr = (PWINDIVERT_IPHDR)NULL;
             ppIpV6Hdr = (PWINDIVERT_IPV6HDR)NULL;
@@ -1129,9 +1198,9 @@ int main(int argc, char *argv[]) {
                      * But if the packet is more than 2 bytes, check ClientHello byte.
                     */
                     if ((packet_dataLen == 2 && memcmp(packet_data, "\x16\x03", 2) == 0) ||
-                        (packet_dataLen >= 3 && memcmp(packet_data, "\x16\x03\x01", 3) == 0))
+                        (packet_dataLen >= 3 && ( memcmp(packet_data, "\x16\x03\x01", 3) == 0 || memcmp(packet_data, "\x16\x03\x03", 3) == 0 )))
                     {
-                        if (do_blacklist) {
+                        if (do_blacklist || do_fragment_by_sni) {
                             sni_ok = extract_sni(packet_data, packet_dataLen,
                                         &host_addr, &host_len);
                         }
@@ -1284,7 +1353,11 @@ int main(int argc, char *argv[]) {
                         current_fragment_size = http_fragment_size;
                     }
                     else if (do_fragment_https && ppTcpHdr->DstPort != htons(80)) {
-                        current_fragment_size = https_fragment_size;
+                        if (do_fragment_by_sni && sni_ok) {
+                            current_fragment_size = (void*)host_addr - packet_data;
+                        } else {
+                            current_fragment_size = https_fragment_size;
+                        }
                     }
 
                     if (current_fragment_size) {
